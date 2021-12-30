@@ -37,7 +37,7 @@ ControlFlowBuilder::ControlFlowBuilder(CFG::NodeContainer& _nodeContainer, Funct
 
 unique_ptr<FunctionFlow> ControlFlowBuilder::createFunctionFlow(
 	CFG::NodeContainer& _nodeContainer,
-	FunctionDefinition const& _function
+	CallableDeclaration const& _callable
 )
 {
 	auto functionFlow = make_unique<FunctionFlow>();
@@ -46,7 +46,7 @@ unique_ptr<FunctionFlow> ControlFlowBuilder::createFunctionFlow(
 	functionFlow->revert = _nodeContainer.newNode();
 	functionFlow->transactionReturn = _nodeContainer.newNode();
 	ControlFlowBuilder builder(_nodeContainer, *functionFlow);
-	builder.appendControlFlow(_function);
+	builder.appendControlFlow(_callable);
 
 	return functionFlow;
 }
@@ -249,12 +249,10 @@ bool ControlFlowBuilder::visit(RevertStatement const& _revert)
 bool ControlFlowBuilder::visit(PlaceholderStatement const&)
 {
 	solAssert(!!m_currentNode, "");
-	solAssert(!!m_placeholderEntry, "");
-	solAssert(!!m_placeholderExit, "");
 
-	connect(m_currentNode, m_placeholderEntry);
-	m_currentNode = newLabel();
-	connect(m_placeholderExit, m_currentNode);
+	m_currentNode->placeholderStatement = true;
+	createLabelHere();
+
 	return false;
 }
 
@@ -297,7 +295,7 @@ bool ControlFlowBuilder::visit(FunctionCall const& _functionCall)
 				_functionCall.expression().accept(*this);
 				ASTNode::listAccept(_functionCall.arguments(), *this);
 
-				m_currentNode->functionCalls.emplace_back(&_functionCall);
+				m_currentNode->functionCall = &_functionCall;
 
 				auto nextNode = newLabel();
 
@@ -318,24 +316,11 @@ bool ControlFlowBuilder::visit(ModifierInvocation const& _modifierInvocation)
 		for (auto& argument: *arguments)
 			appendControlFlow(*argument);
 
-	auto modifierDefinition = dynamic_cast<ModifierDefinition const*>(
-		_modifierInvocation.name().annotation().referencedDeclaration
-	);
-	if (!modifierDefinition) return false;
-	if (!modifierDefinition->isImplemented()) return false;
-	solAssert(!!m_returnNode, "");
+	// TODO collect all modifiers invocations here so we can later selectively
+	// create flows for only those
 
-	m_placeholderEntry = newLabel();
-	m_placeholderExit = newLabel();
-
-	appendControlFlow(*modifierDefinition);
-	connect(m_currentNode, m_returnNode);
-
-	m_currentNode = m_placeholderEntry;
-	m_returnNode = m_placeholderExit;
-
-	m_placeholderEntry = nullptr;
-	m_placeholderExit = nullptr;
+	m_currentNode->modifierInvocation = &_modifierInvocation;
+	createLabelHere();
 
 	return false;
 }
@@ -355,10 +340,23 @@ bool ControlFlowBuilder::visit(FunctionDefinition const& _functionDefinition)
 
 	}
 
-	for (auto const& modifier: _functionDefinition.modifiers())
-		appendControlFlow(*modifier);
+	for (auto const& modifierInvocation: _functionDefinition.modifiers())
+		appendControlFlow(*modifierInvocation);
 
 	appendControlFlow(_functionDefinition.body());
+
+	connect(m_currentNode, m_returnNode);
+	m_currentNode = nullptr;
+
+	return false;
+}
+
+bool ControlFlowBuilder::visit(ModifierDefinition const& _modifierDefinition)
+{
+	for (auto const& parameter: _modifierDefinition.parameters())
+		appendControlFlow(*parameter);
+
+	appendControlFlow(_modifierDefinition.body());
 
 	connect(m_currentNode, m_returnNode);
 	m_currentNode = nullptr;

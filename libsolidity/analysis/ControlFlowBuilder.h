@@ -37,7 +37,7 @@ class ControlFlowBuilder: private ASTConstVisitor, private yul::ASTWalker
 public:
 	static std::unique_ptr<FunctionFlow> createFunctionFlow(
 		CFG::NodeContainer& _nodeContainer,
-		FunctionDefinition const& _function
+		CallableDeclaration const& _callable
 	);
 
 private:
@@ -63,6 +63,7 @@ private:
 
 	// Visits for constructing the control flow as well as filling variable occurrences.
 	bool visit(FunctionDefinition const& _functionDefinition) override;
+	bool visit(ModifierDefinition const& _modifierDefinition) override;
 	bool visit(Return const& _return) override;
 
 	// Visits for filling variable occurrences.
@@ -162,9 +163,6 @@ private:
 	CFGNode* m_breakJump = nullptr;
 	/// The current jump destination of continue Statements.
 	CFGNode* m_continueJump = nullptr;
-
-	CFGNode* m_placeholderEntry = nullptr;
-	CFGNode* m_placeholderExit = nullptr;
 
 	InlineAssembly const* m_inlineAssembly = nullptr;
 

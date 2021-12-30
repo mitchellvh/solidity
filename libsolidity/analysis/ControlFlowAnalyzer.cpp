@@ -34,7 +34,8 @@ using namespace solidity::frontend;
 bool ControlFlowAnalyzer::run()
 {
 	for (auto& [pair, flow]: m_cfg.allFunctionFlows())
-		analyze(*pair.function, pair.contract, *flow);
+		if (auto const* function = dynamic_cast<FunctionDefinition const*>(pair.callable))
+			analyze(*function, pair.contract, *flow);
 
 	return !Error::containsErrors(m_errorReporter.errors());
 }

@@ -41,17 +41,41 @@ bool CFG::visit(FunctionDefinition const& _function)
 bool CFG::visit(ContractDefinition const& _contract)
 {
 	for (ContractDefinition const* contract: _contract.annotation().linearizedBaseContracts)
+	{
 		for (FunctionDefinition const* function: contract->definedFunctions())
 			if (function->isImplemented())
-				m_functionControlFlow[{&_contract, function}] =
+			{
+				// TODO read used modifiers from function flow and create flows
+				// for only those
+
+
+				//auto const& flow =
+					m_functionControlFlow[{&_contract, function}] =
 					ControlFlowBuilder::createFunctionFlow(m_nodeContainer, *function);
+
+	/*	snipped for resolving modifiers
+	 *	for (auto const& modifierInvocation: flow->modifierInvocations)
+				{
+				}
+	auto modifierDefinition = dynamic_cast<ModifierDefinition const*>(
+		_modifierInvocation.name().annotation().referencedDeclaration
+	);
+	if (!modifierDefinition) return false;
+	if (!modifierDefinition->isImplemented()) return false;
+*/
+			}
+		for (ModifierDefinition const* modifier: contract->functionModifiers())
+			if (modifier->isImplemented())
+				m_functionControlFlow[{&_contract, modifier}] =
+					ControlFlowBuilder::createFunctionFlow(m_nodeContainer, *modifier);
+	}
 
 	return true;
 }
 
-FunctionFlow const& CFG::functionFlow(FunctionDefinition const& _function, ContractDefinition const* _contract) const
+FunctionFlow const& CFG::functionFlow(CallableDeclaration const& _callable, ContractDefinition const* _contract) const
 {
-	return *m_functionControlFlow.at({_contract, &_function});
+	return *m_functionControlFlow.at({_contract, &_callable});
 }
 
 CFGNode* CFG::NodeContainer::newNode()

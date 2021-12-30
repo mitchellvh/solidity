@@ -98,8 +98,17 @@ struct CFGNode
 	std::vector<CFGNode*> entries;
 	/// Exit nodes. All CFG nodes to which control flow may continue after this node.
 	std::vector<CFGNode*> exits;
-	/// Function calls done by this node
-	std::vector<FunctionCall const*> functionCalls;
+	/// Modifier this node invokes
+	ModifierInvocation const* modifierInvocation;
+	/// Function call done by this node
+	FunctionCall const* functionCall;
+
+	// TODO possible alternative: have a vector of placeholder nodes in
+	// struct FunctionFlow. Advantages: similar logic/structure, not sure what
+	// else yet.
+
+	/// True if this node contains a PlaceholderStatement
+	bool placeholderStatement = false;
 
 	/// Variable occurrences in the node.
 	std::vector<VariableOccurrence> variableOccurrences;
@@ -132,18 +141,18 @@ struct FunctionFlow
 class CFG: private ASTConstVisitor
 {
 public:
-	struct FunctionContractTuple
+	struct ContractCallableTuple
 	{
 		ContractDefinition const* contract = nullptr;
-		FunctionDefinition const* function = nullptr;
+		CallableDeclaration const* callable = nullptr;
 
 		// Use AST ids for comparison to keep a deterministic order in the
 		// containers using this struct
-		bool operator<(FunctionContractTuple const& _other) const
+		bool operator<(ContractCallableTuple const& _other) const
 		{
 			return
-				std::make_pair(contract ? contract->id() : -1, function->id()) <
-				std::make_pair(_other.contract ? _other.contract->id() : -1, _other.function->id());
+				std::make_pair(contract ? contract->id() : -1, callable->id()) <
+				std::make_pair(_other.contract ? _other.contract->id() : -1, _other.callable->id());
 		}
 	};
 	explicit CFG(langutil::ErrorReporter& _errorReporter): m_errorReporter(_errorReporter) {}
@@ -153,13 +162,13 @@ public:
 	bool visit(FunctionDefinition const& _function) override;
 	bool visit(ContractDefinition const& _contract) override;
 
-	/// Get the function flow for the given function, using `_contract` as the
-	/// most derived contract
-	/// @param _function function to find the function flow for
+	/// Get the control flow for the given function or modifier, using
+	/// `_contract` as the most derived contract
+	/// @param _callable function or modifier to find the control flow for
 	/// @param _contract most derived contract or nullptr for free functions
-	FunctionFlow const& functionFlow(FunctionDefinition const& _function, ContractDefinition const* _contract = nullptr) const;
+	FunctionFlow const& functionFlow(CallableDeclaration const& _callable, ContractDefinition const* _contract = nullptr) const;
 
-	std::map<FunctionContractTuple, std::unique_ptr<FunctionFlow>> const& allFunctionFlows() const
+	std::map<ContractCallableTuple, std::unique_ptr<FunctionFlow>> const& allFunctionFlows() const
 	{
 		return m_functionControlFlow;
 	}
@@ -179,7 +188,7 @@ private:
 	/// are owned by the CFG class and stored in this container.
 	NodeContainer m_nodeContainer;
 
-	std::map<FunctionContractTuple, std::unique_ptr<FunctionFlow>> m_functionControlFlow;
+	std::map<ContractCallableTuple, std::unique_ptr<FunctionFlow>> m_functionControlFlow;
 };
 
 }

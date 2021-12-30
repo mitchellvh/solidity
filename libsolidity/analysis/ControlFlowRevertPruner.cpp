@@ -32,9 +32,9 @@ namespace
 /// Find the right scope for the called function: When calling a base function,
 /// we keep the most derived, but we use the called contract in case it is a
 /// library function or nullptr for a free function.
-ContractDefinition const* findScopeContract(FunctionDefinition const& _function, ContractDefinition const* _callingContract)
+ContractDefinition const* findScopeContract(CallableDeclaration const& _callable, ContractDefinition const* _callingContract)
 {
-	if (auto const* functionContract = _function.annotation().contract)
+	if (auto const* functionContract = _callable.annotation().contract)
 	{
 		if (_callingContract && _callingContract->derivesFrom(*functionContract))
 			return _callingContract;
@@ -49,58 +49,98 @@ ContractDefinition const* findScopeContract(FunctionDefinition const& _function,
 void ControlFlowRevertPruner::run()
 {
 	for (auto& [pair, flow]: m_cfg.allFunctionFlows())
-		m_functions[pair] = RevertState::Unknown;
+		m_callables[pair] = RevertState::Unknown;
 
 	findRevertStates();
 	modifyFunctionFlows();
 }
 
+ModifierDefinition const* resolveModifierInvocation(ModifierInvocation const& _invocation, ContractDefinition const& _contract);
+ModifierDefinition const* resolveModifierInvocation(ModifierInvocation const& _invocation, ContractDefinition const& _contract)
+{
+	if (auto const* modifier = dynamic_cast<ModifierDefinition const*>(_invocation.name().annotation().referencedDeclaration))
+	{
+		VirtualLookup const& requiredLookup = *_invocation.name().annotation().requiredLookup;
+
+		if (requiredLookup == VirtualLookup::Virtual)
+			return &modifier->resolveVirtual(_contract);
+		else
+		{
+			solAssert(requiredLookup == VirtualLookup::Static, "");
+			return modifier;
+		}
+	}
+
+	return nullptr;
+}
+
 void ControlFlowRevertPruner::findRevertStates()
 {
-	std::set<CFG::FunctionContractTuple> pendingFunctions = keys(m_functions);
+	std::set<CFG::ContractCallableTuple> pendingFunctions = keys(m_callables);
 	// We interrupt the search whenever we encounter a call to a function with (yet) unknown
 	// revert behaviour. The ``wakeUp`` data structure contains information about which
 	// searches to restart once we know about the behaviour.
-	std::map<CFG::FunctionContractTuple, std::set<CFG::FunctionContractTuple>> wakeUp;
+	std::map<CFG::ContractCallableTuple, std::set<CFG::ContractCallableTuple>> wakeUp;
 
 	while (!pendingFunctions.empty())
 	{
-		CFG::FunctionContractTuple item = *pendingFunctions.begin();
+		CFG::ContractCallableTuple item = *pendingFunctions.begin();
 		pendingFunctions.erase(pendingFunctions.begin());
 
-		if (m_functions[item] != RevertState::Unknown)
+		if (m_callables[item] != RevertState::Unknown)
 			continue;
 
 		bool foundExit = false;
 		bool foundUnknown = false;
+		bool foundPlaceholder = false;
 
-		FunctionFlow const& functionFlow = m_cfg.functionFlow(*item.function, item.contract);
+		FunctionFlow const& functionFlow = m_cfg.functionFlow(*item.callable, item.contract);
 
 		solidity::util::BreadthFirstSearch<CFGNode*>{{functionFlow.entry}}.run(
 			[&](CFGNode* _node, auto&& _addChild) {
 				if (_node == functionFlow.exit)
 					foundExit = true;
-
-				for (auto const* functionCall: _node->functionCalls)
+				if (_node->placeholderStatement)
 				{
-					auto const* resolvedFunction = ASTNode::resolveFunctionCall(*functionCall, item.contract);
+					foundPlaceholder = true;
+					solAssert(_node != functionFlow.exit, "Placeholder cannot be an exit node!");
+				}
 
-					if (resolvedFunction == nullptr || !resolvedFunction->isImplemented())
-						continue;
+				ModifierDefinition const* modifier = nullptr;
+				FunctionDefinition const* function = nullptr;
+				CallableDeclaration const* callable = nullptr;
 
-					CFG::FunctionContractTuple calledFunctionTuple{
-						findScopeContract(*resolvedFunction, item.contract),
-						resolvedFunction
+				if (_node->modifierInvocation)
+					callable = modifier = resolveModifierInvocation(*_node->modifierInvocation, *item.contract);
+				if (_node->functionCall)
+					callable = function = ASTNode::resolveFunctionCall(*_node->functionCall, item.contract);
+
+				solAssert(!modifier || !function, "Node can only have modifier or function.");
+
+				if (
+					(modifier && modifier->isImplemented()) ||
+					(function && function->isImplemented())
+				)
+				{
+					CFG::ContractCallableTuple calledCallableTuple{
+						findScopeContract(*callable, item.contract),
+						callable
 					};
-					switch (m_functions.at(calledFunctionTuple))
+					switch (m_callables.at(calledCallableTuple))
 					{
 						case RevertState::Unknown:
-							wakeUp[calledFunctionTuple].insert(item);
+							wakeUp[calledCallableTuple].insert(item);
 							foundUnknown = true;
 							return;
 						case RevertState::AllPathsRevert:
 							return;
 						case RevertState::HasNonRevertingPath:
+							break;
+						case RevertState::ModifierRevertPassthrough:
+							solAssert(
+								dynamic_cast<ModifierDefinition const*>(callable),
+								"Invalid state for function flow."
+							);
 							break;
 					}
 				}
@@ -110,18 +150,23 @@ void ControlFlowRevertPruner::findRevertStates()
 			}
 		);
 
-		auto& revertState = m_functions[item];
+		auto& revertState = m_callables[item];
 
 		if (foundExit)
-			revertState = RevertState::HasNonRevertingPath;
+		{
+			if (foundPlaceholder)
+				revertState = RevertState::ModifierRevertPassthrough;
+			else
+				revertState = RevertState::HasNonRevertingPath;
+		}
 		else if (!foundUnknown)
 			revertState = RevertState::AllPathsRevert;
 
 		if (revertState != RevertState::Unknown && wakeUp.count(item))
 		{
 			// Restart all searches blocked by this function.
-			for (CFG::FunctionContractTuple const& nextItem: wakeUp[item])
-				if (m_functions.at(nextItem) == RevertState::Unknown)
+			for (CFG::ContractCallableTuple const& nextItem: wakeUp[item])
+				if (m_callables.at(nextItem) == RevertState::Unknown)
 					pendingFunctions.insert(nextItem);
 			wakeUp.erase(item);
 		}
@@ -130,36 +175,34 @@ void ControlFlowRevertPruner::findRevertStates()
 
 void ControlFlowRevertPruner::modifyFunctionFlows()
 {
-	for (auto& item: m_functions)
+	for (auto& item: m_callables)
 	{
-		FunctionFlow const& functionFlow = m_cfg.functionFlow(*item.first.function, item.first.contract);
+		FunctionFlow const& functionFlow = m_cfg.functionFlow(*item.first.callable, item.first.contract);
 		solidity::util::BreadthFirstSearch<CFGNode*>{{functionFlow.entry}}.run(
 			[&](CFGNode* _node, auto&& _addChild) {
-				for (auto const* functionCall: _node->functionCalls)
+				if (auto const* functionCall =  _node->functionCall)
 				{
 					auto const* resolvedFunction = ASTNode::resolveFunctionCall(*functionCall, item.first.contract);
 
-					if (resolvedFunction == nullptr || !resolvedFunction->isImplemented())
-						continue;
+					if (resolvedFunction && resolvedFunction->isImplemented())
+						switch (m_callables.at({findScopeContract(*resolvedFunction, item.first.contract), resolvedFunction}))
+						{
+							case RevertState::Unknown:
+								[[fallthrough]];
+							case RevertState::AllPathsRevert:
+								// If the revert states of the functions do not
+								// change anymore, we treat all "unknown" states as
+								// "reverting", since they can only be caused by
+								// recursion.
+								for (CFGNode * node: _node->exits)
+									ranges::remove(node->entries, _node);
 
-					switch (m_functions.at({findScopeContract(*resolvedFunction, item.first.contract), resolvedFunction}))
-					{
-						case RevertState::Unknown:
-							[[fallthrough]];
-						case RevertState::AllPathsRevert:
-							// If the revert states of the functions do not
-							// change anymore, we treat all "unknown" states as
-							// "reverting", since they can only be caused by
-							// recursion.
-							for (CFGNode * node: _node->exits)
-								ranges::remove(node->entries, _node);
-
-							_node->exits = {functionFlow.revert};
-							functionFlow.revert->entries.push_back(_node);
-							return;
-						default:
-							break;
-					}
+								_node->exits = {functionFlow.revert};
+								functionFlow.revert->entries.push_back(_node);
+								return;
+							default:
+								break;
+						}
 				}
 
 				for (CFGNode* exit: _node->exits)

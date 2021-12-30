@@ -37,12 +37,13 @@ public:
 
 	void run();
 private:
-	/// Possible revert states of a function call
+	/// Possible revert states of a function or modifier call
 	enum class RevertState
 	{
 		AllPathsRevert,
 		HasNonRevertingPath,
 		Unknown,
+		ModifierRevertPassthrough,
 	};
 
 	/// Identify revert states of all function flows
@@ -54,8 +55,8 @@ private:
 	/// Control Flow Graph object.
 	CFG& m_cfg;
 
-	/// function/contract pairs mapped to their according revert state
-	std::map<CFG::FunctionContractTuple, RevertState> m_functions;
+	/// function/modifier & contract pairs mapped to their according revert state
+	std::map<CFG::ContractCallableTuple, RevertState> m_callables;
 
 	std::map<
 		std::tuple<FunctionCall const*, ContractDefinition const*>,
